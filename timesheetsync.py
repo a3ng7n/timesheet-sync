@@ -1,5 +1,7 @@
 from toggl.TogglPy import Toggl
 import argparse
+import harvest
+import datetime
 
 def main(args):
     
@@ -15,11 +17,17 @@ def main(args):
     for client in response:
         print("Client name: %s  Client id: %s" % (client['name'], client['id']))
 
+    
+    client = harvest.Harvest("https://sirromsystems.harvestapp.com", account_id=args.harvest_account_id, personal_token=args.harvest_key)
+    print(client.get_day(day_of_the_year=datetime.date(2020, 2, 18).timetuple().tm_yday, year=2020)['day_entries'])
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('-tk', '--toggl-key', dest='toggl_key',
                         help='toggl api key')
+    parser.add_argument('-hai', '--harvest-account-id', dest='harvest_account_id',
+                        help='harvest account id')
     parser.add_argument('-hk', '--harvest-key', dest='harvest_key',
                         help='harvest api key')
     
