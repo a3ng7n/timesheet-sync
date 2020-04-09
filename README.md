@@ -26,3 +26,6 @@ There are unfortunately quite a few args, but hey, what can you do:
 For help, do the usual:
 
     python timesheetsync.py --help
+
+## License
+See LICENSE
