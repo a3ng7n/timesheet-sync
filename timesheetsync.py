@@ -14,7 +14,6 @@ def main(args):
     toggl.setAPIKey(args.toggl_key)
     
     toggl_tz_str = toggl.request("https://www.toggl.com/api/v8/me")['data']['timezone']
-    print(toggl_tz_str)
     toggl_tz = pytz.timezone(toggl_tz_str)
     
     sdate = datetime(2020, 1, 1, 0, 0, 0, 0)
@@ -34,6 +33,13 @@ def main(args):
     
     # collect harvest entries
     account = harvest.Harvest(uri=args.harvest_url, account_id=args.harvest_account_id, personal_token=args.harvest_key)
+    
+    try:
+        harvest_user_id = [x['user']['id'] for x in account.users if x['user']['email'] == args.harvest_email].pop()
+    except IndexError:
+        print("Could not find user with email address: {0}".format(args.harvest_email))
+        raise
+    
     harvest_entries = []
     for client in account.clients():
         for project in account.projects_for_client(client['client']['id']):
@@ -81,9 +87,20 @@ def main(args):
                             combined_entries_dict[date][platform]['tasks'][entry['notes']] += entry['hours']
                         except KeyError:
                             combined_entries_dict[date][platform]['tasks'][entry['notes']] = entry['hours']
+            
+        for date in combined_entries_dict.keys():
+            if combined_entries_dict[date]['toggl']['tasks'] and not combined_entries_dict[date]['harvest']['tasks']:
+                for task in combined_entries_dict[date]['toggl']['tasks'].keys():
+                    data_for_entry = {'project_id': args.harvest_project_id,
+                                      'task_id': args.harvest_task_id,
+                                      'spent_date': date.date().isoformat(),
+                                      'hours': round(combined_entries_dict[date]['toggl']['tasks'][task],2)}
+                    account.add_for_user(user_id=harvest_user_id, data=data_for_entry)
     
     
     pp.pprint([[combined_entries_dict[x][y]['tasks'] for y in combined_entries_dict[x].keys()] for x in combined_entries_dict.keys()])
+
+    pp.pprint(combined_entries_dict)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
@@ -95,7 +112,12 @@ if __name__ == "__main__":
                         help='harvest account id')
     parser.add_argument('-hk', '--harvest-key', dest='harvest_key',
                         help='harvest api key')
-    
-    
+    parser.add_argument('-htid', '--harvest-task-id', dest='harvest_task_id', type=int,
+                        help='task id to create new time entries under')
+    parser.add_argument('-hpid', '--harvest-project-id', dest='harvest_project_id', type=int,
+                        help='project id to create new time entries under')
+    parser.add_argument('-hem', '--harvest-email', dest='harvest_email',
+                        help='the email address associated with your harvest user to create new time entries under')
+
     args = parser.parse_args()
     main(args)
