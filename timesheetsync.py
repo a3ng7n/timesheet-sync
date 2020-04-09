@@ -1,7 +1,7 @@
 from toggl.TogglPy import Toggl, Endpoints
 import argparse
 import harvest
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, timedelta
 import pytz
 import dateutil.parser
 import pprint
