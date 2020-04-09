@@ -4,9 +4,10 @@ import harvest
 from datetime import datetime, date, timedelta, timezone
 import pytz
 import dateutil.parser
+import pprint
 
 def main(args):
-
+    pp = pprint.PrettyPrinter(indent=4)
     
     # create a Toggl object and set our API key
     toggl = Toggl()
@@ -21,6 +22,7 @@ def main(args):
     edate = datetime.today().replace(microsecond=0)
     edate_aw = toggl_tz.localize(edate)
     
+    # collect toggl entries
     toggl_entries = []
     for client in toggl.getClients():
         print("Client name: %s  Client id: %s" % (client['name'], client['id']))
@@ -30,6 +32,7 @@ def main(args):
                                                           {'start_date': sdate_aw.isoformat(),
                                                            'end_date': edate_aw.isoformat()})
     
+    # collect harvest entries
     account = harvest.Harvest(uri=args.harvest_url, account_id=args.harvest_account_id, personal_token=args.harvest_key)
     harvest_entries = []
     for client in account.clients():
@@ -39,23 +42,48 @@ def main(args):
                                                                                start_date=sdate_aw.isoformat(),
                                                                                end_date=edate_aw.isoformat())
     
+    # organize toggl entries by dates worked
     delta = edate - sdate
     dates = [sdate + timedelta(days=i) for i in range(delta.days + 1)]
-    toggl_entries_dict = {}
+    combined_entries_dict = {}
     for date in dates:
+        # collect entries from either platform on the given date
         from_toggl = [x for x in toggl_entries
                       if ((dateutil.parser.parse(x['start']).astimezone(toggl_tz) > toggl_tz.localize(date))
-                          and (dateutil.parser.parse(x['start']).astimezone(toggl_tz) <= toggl_tz.localize(date) + timedelta(days=1)))]
+                          and (dateutil.parser.parse(x['start']).astimezone(toggl_tz) <= toggl_tz.localize(date)
+                               + timedelta(days=1)))]
+
+        from_harvest = [x['day_entry'] for x in harvest_entries
+                      if dateutil.parser.parse(x['day_entry']['spent_at']).astimezone(toggl_tz) == toggl_tz.localize(date)]
         
-        if from_toggl:
-            toggl_entries_dict[date] = {
-                'raw': from_toggl
+        if from_toggl or from_harvest:
+            combined_entries_dict[date] = {
+                'toggl': {
+                    'raw': from_toggl,
+                    'tasks': {}
+                },
+                'harvest': {
+                    'raw': from_harvest,
+                    'tasks': {}
+                }
             }
+            
+            # organize raw entries into unique tasks, and total time for that day
+            for platform in combined_entries_dict[date].keys():
+                for entry in combined_entries_dict[date][platform]['raw']:
+                    if platform == 'toggl':
+                        try:
+                            combined_entries_dict[date][platform]['tasks'][entry['description']] += entry['duration']/3600
+                        except KeyError:
+                            combined_entries_dict[date][platform]['tasks'][entry['description']] = entry['duration']/3600
+                    else:
+                        try:
+                            combined_entries_dict[date][platform]['tasks'][entry['notes']] += entry['hours']
+                        except KeyError:
+                            combined_entries_dict[date][platform]['tasks'][entry['notes']] = entry['hours']
     
-    print(toggl_entries_dict)
-    print(sdate.isoformat())
-    print(edate.isoformat())
-    print('done')
+    
+    pp.pprint([[combined_entries_dict[x][y]['tasks'] for y in combined_entries_dict[x].keys()] for x in combined_entries_dict.keys()])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
