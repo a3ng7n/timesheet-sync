@@ -88,19 +88,15 @@ def main(args):
                         except KeyError:
                             combined_entries_dict[date][platform]['tasks'][entry['notes']] = entry['hours']
             
-        for date in combined_entries_dict.keys():
-            if combined_entries_dict[date]['toggl']['tasks'] and not combined_entries_dict[date]['harvest']['tasks']:
-                for task in combined_entries_dict[date]['toggl']['tasks'].keys():
-                    data_for_entry = {'project_id': args.harvest_project_id,
-                                      'task_id': args.harvest_task_id,
-                                      'spent_date': date.date().isoformat(),
-                                      'hours': round(combined_entries_dict[date]['toggl']['tasks'][task],2)}
-                    account.add_for_user(user_id=harvest_user_id, data=data_for_entry)
-    
-    
-    pp.pprint([[combined_entries_dict[x][y]['tasks'] for y in combined_entries_dict[x].keys()] for x in combined_entries_dict.keys()])
-
-    pp.pprint(combined_entries_dict)
+    for date, entry in combined_entries_dict.items():
+        if entry['toggl']['tasks'] and not entry['harvest']['tasks']:
+            for task in entry['toggl']['tasks'].keys():
+                data_for_entry = {'project_id': args.harvest_project_id,
+                                  'task_id': args.harvest_task_id,
+                                  'spent_at': date.date().isoformat(),
+                                  'hours': round(entry['toggl']['tasks'][task],2),
+                                  'notes': task}
+                pp.pprint(account.add_for_user(user_id=harvest_user_id, data=data_for_entry))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
