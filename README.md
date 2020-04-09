@@ -1,10 +1,15 @@
 # timesheet-sync
 A tool to convert [Toggl](https://toggl.com/) time entries 
 into [Harvest](https://www.getharvest.com/) timesheet entries.
-## Prereqs
+## Requirements
+Primarily this tool is meant for people who use Toggl to track their time spent on task, but also want to use Harvest to track budgets and handle invoicing etc..\
+So, you'll need the following:
 * Python 3
 * Toggl account
 * Harvest account
+You'll also need to obtain api keys for either account:
+* Toggl api key: https://toggl.com/app/profile (and see "API token" at the bottom of the page)
+* Harvest api key: https://id.getharvest.com/oauth2/access_tokens/new
 
 ## Installation
     git clone git@github.com:a3ng7n/timesheet-sync.git
