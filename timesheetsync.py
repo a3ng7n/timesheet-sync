@@ -43,7 +43,7 @@ def main(args):
     partials = (edate - sdate).days % 180
 
     for i in range((edate - sdate).days // 180):
-        toggl_dateranges.append([sdate + timedelta(days=i * 180), sdate + timedelta(days=(i + 1) * 180)])
+        toggl_dateranges.append([sdate + timedelta(days=i * 180), sdate + timedelta(days=(i + 1) * 180 - 1)])
 
     if partials:
         toggl_dateranges.append([sdate + timedelta(days=chunks * 180), sdate + timedelta(days=chunks * 180 + partials)])
@@ -110,7 +110,7 @@ def main(args):
     for i, t in enumerate(harvest_task_names):
         t['id'] = i
     
-    task_allocation = task_allocation_config(toggl_account, toggl_task_names, harvest_account, harvest_task_names)
+    task_association = task_association_config(toggl_account, toggl_task_names, harvest_account, harvest_task_names)
     
     # organize toggl entries by dates worked
     delta = edate - sdate
@@ -142,10 +142,13 @@ def main(args):
             for platform in combined_entries_dict[date].keys():
                 for entry in combined_entries_dict[date][platform]['raw']:
                     if platform == 'toggl':
+                        if entry['pid'] not in combined_entries_dict[date][platform]['tasks'].keys():
+                            combined_entries_dict[date][platform]['tasks'][entry['pid']] = {}
+                        
                         try:
-                            combined_entries_dict[date][platform]['tasks'][entry['description']] += entry['duration']/3600
+                            combined_entries_dict[date][platform]['tasks'][entry['pid']][entry['description']] += entry['dur']/3600000
                         except KeyError:
-                            combined_entries_dict[date][platform]['tasks'][entry['description']] = entry['duration']/3600
+                            combined_entries_dict[date][platform]['tasks'][entry['pid']][entry['description']] = entry['dur']/3600000
                     else:
                         try:
                             combined_entries_dict[date][platform]['tasks'][entry['notes']] += entry['hours']
@@ -153,15 +156,29 @@ def main(args):
                             combined_entries_dict[date][platform]['tasks'][entry['notes']] = entry['hours']
     
     # add data to harvest
+    add_to_harvest = []
     for date, entry in combined_entries_dict.items():
         if entry['toggl']['tasks'] and not entry['harvest']['tasks']:
-            for task in entry['toggl']['tasks'].keys():
-                data_for_entry = {'project_id': args.harvest_project_id,
-                                  'task_id': args.harvest_task_id,
-                                  'spent_at': date.date().isoformat(),
-                                  'hours': round(entry['toggl']['tasks'][task],2),
-                                  'notes': task}
-                #pp.pprint(account.add_for_user(user_id=harvest_user_id, data=data_for_entry))
+            for pid in entry['toggl']['tasks'].keys():
+                for task in entry['toggl']['tasks'][pid].keys():
+                    for hidpair in list(zip(task_association[pid][task]['harvest_project_id'], task_association[pid][task]['harvest_task_id'])):
+                        add_to_harvest.append({'project_id': hidpair[0],
+                                          'task_id': hidpair[1],
+                                          'spent_at': date.date().isoformat(),
+                                          'hours': round(entry['toggl']['tasks'][pid][task],2),
+                                          'notes': task})
+    
+    print("The following Toggl entries will be added to Harvest:")
+    pp.pprint(add_to_harvest)
+    if input("""Add the entries noted above to harvest? (y/n)""").lower() in ('y', 'yes'):
+        for entry in add_to_harvest:
+            pp.pprint(harvest_account.add_for_user(user_id=harvest_user_id, data=entry))
+    else:
+        print('aborted')
+        exit(1)
+    
+    print('done!')
+    exit(0)
 
 def presentation_table(toggl, toggl_tasks, harvest, harvest_tasks):
     presentation_header = ['Toggl #', 'Toggl Project', 'Toggl Task Desc.',
@@ -199,7 +216,7 @@ def presentation_table(toggl, toggl_tasks, harvest, harvest_tasks):
     
     return presentation_table, presentation_header
     
-def task_allocation_config(toggl, toggl_tasks, harvest, harvest_tasks):
+def task_association_config(toggl, toggl_tasks, harvest, harvest_tasks):
     
     print("""The following are two tables, one showing the tasks across your Toggl account, and the other showing
 tasks across your Harvest account.""")
@@ -245,8 +262,8 @@ NOTE: Any task #s not appearing in a task config will be ignored."""
             task_association[task['pid']][task['description']] = { 'harvest_project_id': [], 'harvest_task_id': [] }
 
     cfgpat = re.compile(
-        r'((?P<config>(?P<togglids>(((\d\:\d)|(\d)){1}\,?)+)(\>{1})(?P<harvestids>(((\d\:\d)|(\d)){1}\,?)+))(\|)?)')
-    idpat = re.compile(r'(?P<id>((?P<list>(?P<first>\d)\:(?P<second>\d))|(?P<single>\d)){1}\,?)')
+        r'((?P<config>(?P<togglids>(((\d+\:\d+)|(\d+)){1}\,?)+)(\>{1})(?P<harvestids>(((\d+\:\d+)|(\d+)){1}\,?)+))(\|)?)')
+    idpat = re.compile(r'(?P<id>((?P<list>(?P<first>\d+)\:(?P<second>\d+))|(?P<single>\d+)){1}\,?)')
     
     config_groups = []
     while True:
@@ -261,14 +278,14 @@ NOTE: Any task #s not appearing in a task config will be ignored."""
             
             htasks = []
             for idmatch in hidmatches:
-                if idmatch['list']:
+                if idmatch['list'] is not None:
                     htasks = htasks + harvest_tasks[int(idmatch['first']):int(idmatch['second'])+1]
                 else:
                     htasks.append(harvest_tasks[int(idmatch['single'])])
 
             ttasks = []
             for idmatch in tidmatches:
-                if idmatch['list']:
+                if idmatch['list'] is not None:
                     ttasks = ttasks + toggl_tasks[int(idmatch['first']):int(idmatch['second'])+1]
                 else:
                     ttasks.append(toggl_tasks[int(idmatch['single'])])
