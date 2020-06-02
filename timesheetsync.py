@@ -312,12 +312,9 @@ NOTE: Any task #s not appearing in a task config will be ignored."""
                                                                                           config_group['htasks']])
 
     return task_association
-    
-def show_preview():
-    print("TODO - show the user a preview of what will be transferred over to harvest - perhaps also allow item by item approval")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Process some integers.')
+    parser = argparse.ArgumentParser(description='A tool to convert Toggl time entries into Harvest timesheet entries.')
     parser.add_argument('-tk', '--toggl-key', dest='toggl_key',
                         help='toggl api key')
     parser.add_argument('-url', '--harvest-url', dest='harvest_url',
@@ -326,10 +323,6 @@ if __name__ == "__main__":
                         help='harvest account id')
     parser.add_argument('-hk', '--harvest-key', dest='harvest_key',
                         help='harvest api key')
-    parser.add_argument('-htid', '--harvest-task-id', dest='harvest_task_id', type=int,
-                        help='task id to create new time entries under')
-    parser.add_argument('-hpid', '--harvest-project-id', dest='harvest_project_id', type=int,
-                        help='project id to create new time entries under')
     parser.add_argument('-hem', '--harvest-email', dest='harvest_email',
                         help='the email address associated with your harvest user to create new time entries under')
     timeparse = parser.add_argument_group(description='''Time bounds of syncronization. If neither are given, '''

@@ -1,12 +1,16 @@
 certifi==2019.11.28
 chardet==3.0.4
+dateparser==0.7.4
 idna==2.9
 oauthlib==3.1.0
 python-dateutil==2.8.1
 python-harvest-redux==4.0.0
 pytz==2019.3
+regex==2020.5.14
 requests==2.23.0
 requests-oauthlib==1.3.0
 six==1.14.0
+tabulate==0.8.7
 TogglPy==0.1.1
+tzlocal==2.1
 urllib3==1.25.8
