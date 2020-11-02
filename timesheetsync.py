@@ -8,6 +8,7 @@ import pprint
 from tabulate import tabulate
 import dateparser
 import re
+import time
 
 def main(args):
     pp = pprint.PrettyPrinter(indent=4)
@@ -185,6 +186,8 @@ def presentation_table(toggl, toggl_tasks, harvest, harvest_tasks):
                            'Harvest #', 'Harvest Client', 'Harvest Project', 'Harvest Task']
     presentation_table = []
     while True:
+        time.sleep(1)
+
         idx = len(presentation_table)
         if (idx < len(toggl_tasks)) and (idx < len(harvest_tasks)): # add both details to table
             line = [toggl_tasks[idx]['id'],
