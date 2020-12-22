@@ -79,33 +79,34 @@ def main(args):
                 
     # collect harvest entries
     harvest_account = harvest.Harvest(uri=args.harvest_url, account_id=args.harvest_account_id, personal_token=args.harvest_key)
-        
+    
     try:
         harvest_user_id = [x['user']['id'] for x in harvest_account.users if x['user']['email'] == args.harvest_email].pop()
     except IndexError:
         print("Could not find user with email address: {0}".format(args.harvest_email))
         raise
     
+    tasks = []
     harvest_entries = []
     harvest_clients = harvest_account.clients()
     for client in harvest_clients:
         harvest_projects = harvest_account.projects_for_client(client['client']['id'])
         for project in harvest_projects:
+            some_entries = harvest_account.timesheets_for_project(project['project']['id'],
+                                                                  start_date=sdate_aw.isoformat(),
+                                                                  end_date=edate_aw.isoformat())
+            for e in some_entries:
+                e['day_entry']['client_id'] = [y['project']['client_id'] for y in harvest_projects if
+                            y['project']['id'] == e['day_entry']['project_id']].pop()
             
-            harvest_entries = harvest_entries + harvest_account.timesheets_for_project(project['project']['id'],
-                                                                               start_date=sdate_aw.isoformat(),
-                                                                               end_date=edate_aw.isoformat())
-    for e in harvest_entries:
-        e['day_entry']['client_id'] = [y['project']['client_id'] for y in harvest_projects if
-                      y['project']['id'] == e['day_entry']['project_id']].pop()
-    
-    task_names = [{'id': str(x['day_entry']['client_id'])\
-                         + str(x['day_entry']['project_id'])\
-                         + str(x['day_entry']['task_id']),
-                   'client_id': x['day_entry']['client_id'],
-                   'project_id': x['day_entry']['project_id'],
-                   'task_id': x['day_entry']['task_id']}
-                  for x in harvest_entries]
+            harvest_entries = harvest_entries + some_entries
+            
+            tasks = tasks + [{**x['task_assignment'], 'client_id': client['client']['id']} for x in harvest_account.get_all_tasks_from_project(project['project']['id'])]
+
+    task_names = [{**x, 'id': str(x['client_id'])\
+                         + str(x['project_id'])\
+                         + str(x['task_id'])}
+                  for x in tasks]
     harvest_task_names = list({x['id']: x for x in task_names}.values())
     harvest_task_names = sorted(harvest_task_names, key=lambda k: k['client_id'])
     for i, t in enumerate(harvest_task_names):
