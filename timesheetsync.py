@@ -1,6 +1,5 @@
 from toggl.TogglPy import Toggl, Endpoints
 import argparse
-import harvest
 from datetime import datetime, timedelta
 import pytz
 import dateutil.parser
@@ -8,7 +7,16 @@ import pprint
 from tabulate import tabulate
 import dateparser
 import re
-import time
+import requests
+import textwrap
+
+HARVEST_API_BASE_URL = "https://api.harvestapp.com/v2"
+HARVEST_TIME_ENTRIES_URL = HARVEST_API_BASE_URL + "/time_entries"
+HARVEST_USERS_URL = HARVEST_API_BASE_URL + "/users"
+HARVEST_CLIENTS_URL = HARVEST_API_BASE_URL + "/clients"
+HARVEST_TASKS_URL = HARVEST_API_BASE_URL + "/tasks"
+HARVEST_TASK_ASSIGNMENTS_URL = HARVEST_API_BASE_URL + "/task_assignments"
+HARVEST_PROJECTS_URL = HARVEST_API_BASE_URL + "/projects"
 
 def main(args):
     pp = pprint.PrettyPrinter(indent=4)
@@ -34,9 +42,6 @@ def main(args):
     else:
         edate = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         sdate = edate + timedelta(days=-365)
-
-    sdate_aw = toggl_tz.localize(sdate)
-    edate_aw = toggl_tz.localize(edate)
     
     # do some fancy date windowing required for retrieving tasks from toggl
     toggl_dateranges = []
@@ -71,48 +76,38 @@ def main(args):
                 entries_left = entries['total_count'] - entries['per_page'] if page == 1 else entries_left - entries['per_page']
                 page += 1
     
-    task_names = [{'id': str(x['pid']) + x['description'], 'pid': x['pid'], 'description': x['description']} for x in toggl_entries]
+    task_names = [{'id': str(x['pid']) + x['description'], 'pid': x['pid'], 'description': x['description'], 'project': x['project']} for x in toggl_entries]
     toggl_task_names = list({x['id']:x for x in task_names}.values())
     toggl_task_names = sorted(toggl_task_names, key=lambda k: k['pid'] if k['pid'] else 0)
     for i, t in enumerate(toggl_task_names):
         t['id'] = i
                 
     # collect harvest entries
-    harvest_account = harvest.Harvest(uri=args.harvest_url, account_id=args.harvest_account_id, personal_token=args.harvest_key)
-    
+    harvester = Harvest(args.harvest_account_id, args.harvest_key)
+    harvest_users = harvester.get_users()
+
     try:
-        harvest_user_id = [x['user']['id'] for x in harvest_account.users if x['user']['email'] == args.harvest_email].pop()
+        harvest_user_id = [usr['id'] for usr in harvest_users if usr['email'] == args.harvest_email].pop()
     except IndexError:
         print("Could not find user with email address: {0}".format(args.harvest_email))
         raise
     
-    tasks = []
-    harvest_entries = []
-    harvest_clients = harvest_account.clients()
-    for client in harvest_clients:
-        harvest_projects = harvest_account.projects_for_client(client['client']['id'])
-        for project in harvest_projects:
-            some_entries = harvest_account.timesheets_for_project(project['project']['id'],
-                                                                  start_date=sdate_aw.isoformat(),
-                                                                  end_date=edate_aw.isoformat())
-            for e in some_entries:
-                e['day_entry']['client_id'] = [y['project']['client_id'] for y in harvest_projects if
-                            y['project']['id'] == e['day_entry']['project_id']].pop()
-            
-            harvest_entries = harvest_entries + some_entries
-            
-            tasks = tasks + [{**x['task_assignment'], 'client_id': client['client']['id']} for x in harvest_account.get_all_tasks_from_project(project['project']['id'])]
+    harvest_entries = harvester.get_time_entries()
+    harvest_projects = harvester.get_projects()
+    harvest_task_assignments = harvester.get_task_assignments()
 
-    task_names = [{**x, 'id': str(x['client_id'])\
-                         + str(x['project_id'])\
-                         + str(x['task_id'])}
-                  for x in tasks]
-    harvest_task_names = list({x['id']: x for x in task_names}.values())
-    harvest_task_names = sorted(harvest_task_names, key=lambda k: k['client_id'])
-    for i, t in enumerate(harvest_task_names):
-        t['id'] = i
-    
-    task_association = task_association_config(toggl_account, toggl_task_names, harvest_account, harvest_task_names)
+    # organize the list of task assignments to be used for listing later
+    for task_assignment in harvest_task_assignments:
+        try:
+            task_assignment['client'] = [project['client'] for project in harvest_projects if project['id'] == task_assignment['project']['id']].pop()
+        except IndexError:
+            print("Could not find project with id: {0}".format(task_assignment['project']['id']))
+            raise
+
+    harvest_task_names = sorted(harvest_task_assignments, key=lambda k: k['client']['id'])
+
+    # prompt the user for a task association config
+    task_association = task_association_config(toggl_task_names, harvest_task_names)
     
     # organize toggl entries by dates worked
     delta = edate - sdate
@@ -125,8 +120,8 @@ def main(args):
                           and (dateutil.parser.parse(x['start']).astimezone(toggl_tz) <= toggl_tz.localize(date)
                                + timedelta(days=1)))]
 
-        from_harvest = [x['day_entry'] for x in harvest_entries
-                      if dateutil.parser.parse(x['day_entry']['spent_at']).astimezone(toggl_tz) == toggl_tz.localize(date)]
+        from_harvest = [x for x in harvest_entries
+                      if dateutil.parser.parse(x['spent_date']).astimezone(toggl_tz) == toggl_tz.localize(date)]
         
         if from_toggl or from_harvest:
             combined_entries_dict[date] = {
@@ -164,17 +159,22 @@ def main(args):
             for pid in entry['toggl']['tasks'].keys():
                 for task in entry['toggl']['tasks'][pid].keys():
                     for hidpair in list(zip(task_association[pid][task]['harvest_project_id'], task_association[pid][task]['harvest_task_id'])):
-                        add_to_harvest.append({'project_id': hidpair[0],
-                                          'task_id': hidpair[1],
-                                          'spent_at': date.date().isoformat(),
-                                          'hours': round(entry['toggl']['tasks'][pid][task],2),
-                                          'notes': task})
+                        add_to_harvest.append({'user_id': harvest_user_id,
+                                            'project_id': hidpair[0],
+                                            'task_id': hidpair[1],
+                                            'spent_date': date.date().isoformat(),
+                                            'hours': round(entry['toggl']['tasks'][pid][task],2),
+                                            'notes': task})
     
     print("The following Toggl entries will be added to Harvest:")
-    pp.pprint(add_to_harvest)
+    add_to_harvest_tabulated = {k: [d[k] for d in add_to_harvest] for k in add_to_harvest[0]}
+    print(tabulate(add_to_harvest_tabulated, headers='keys'))
     if input("""Add the entries noted above to harvest? (y/n)""").lower() in ('y', 'yes'):
         for entry in add_to_harvest:
-            pp.pprint(harvest_account.add_for_user(user_id=harvest_user_id, data=entry))
+            #'{"user_id":1782959,"project_id":14307913,"task_id":8083365,"spent_date":"2017-03-21","hours":1.0}'
+            print('About to post: ')
+            pp.pprint(entry)
+            pp.pprint(harvester.post_all(url=HARVEST_TIME_ENTRIES_URL, data=entry))
     else:
         print('aborted')
         exit(1)
@@ -182,25 +182,96 @@ def main(args):
     print('done!')
     exit(0)
 
-def presentation_table(toggl, toggl_tasks, harvest, harvest_tasks):
+class Harvest:
+    def __init__(self, hai: str, hk: str):
+        self.account_id = hai
+        self.auth_key = hk
+    
+    def post_all(self, url: str, data: dict):
+        url_address = url
+        headers = {
+            "Authorization": "Bearer " + self.auth_key,
+            "Harvest-Account-ID": self.account_id
+        }
+
+        # find out total number of pages
+        r = requests.post(url=url_address, headers=headers, data=data).json()
+
+        return r
+    
+    def get_all(self, url: str, list_key: str = None):
+
+        url_address = url
+        headers = {
+            "Authorization": "Bearer " + self.auth_key,
+            "Harvest-Account-ID": self.account_id
+        }
+
+        # find out total number of pages
+        r = requests.get(url=url_address, headers=headers).json()
+        total_pages = int(r['total_pages'])
+
+        # results will be appended to this list
+        all_results = []
+
+        # loop through all pages and return JSON object
+        for page in range(1, total_pages+1):
+
+            url = url_address + "?page="+str(page)
+            response = requests.get(url=url, headers=headers).json()        
+            all_results.append(response)
+
+        if list_key is not None:
+            data = []
+            for page in all_results:
+                data += page.get(list_key, [])
+
+            return data
+        else:
+            return all_results
+
+    def get_users(self):
+        data = self.get_all(HARVEST_USERS_URL, 'users')
+        return data
+
+    def get_time_entries(self):
+        data = self.get_all(HARVEST_TIME_ENTRIES_URL, 'time_entries')
+        return data
+    
+    def get_clients(self):
+        data = self.get_all(HARVEST_CLIENTS_URL, 'clients')
+        return data
+    
+    def get_task_assignments(self):
+        data = self.get_all(HARVEST_TASK_ASSIGNMENTS_URL, 'task_assignments')
+        return data
+    
+    def get_tasks(self):
+        data = self.get_all(HARVEST_TASKS_URL, 'tasks')
+        return data
+    
+    def get_projects(self):
+        data = self.get_all(HARVEST_PROJECTS_URL, 'projects')
+        return data
+
+
+def presentation_table(toggl_tasks, harvest_tasks):
     presentation_header = ['Toggl #', 'Toggl Project', 'Toggl Task Desc.',
                            'Harvest #', 'Harvest Client', 'Harvest Project', 'Harvest Task']
     presentation_table = []
     while True:
-        time.sleep(1)
-
         idx = len(presentation_table)
         if (idx < len(toggl_tasks)) and (idx < len(harvest_tasks)): # add both details to table
             line = [toggl_tasks[idx]['id'],
-                    toggl.getProject(toggl_tasks[idx]['pid'])['data']['name'] if toggl_tasks[idx]['pid'] else 'None',
+                    textwrap.shorten(toggl_tasks[idx]['project'], width=20),
                     toggl_tasks[idx]['description'],
-                    harvest_tasks[idx]['id'],
-                    harvest.get_client(harvest_tasks[idx]['client_id'])['client']['name'],
-                    harvest.get_project(harvest_tasks[idx]['project_id'])['project']['name'],
-                    harvest.get_task(harvest_tasks[idx]['task_id'])['task']['name']]
+                    idx,
+                    textwrap.shorten(harvest_tasks[idx]['client']['name'], width=20),
+                    harvest_tasks[idx]['project']['name'],
+                    harvest_tasks[idx]['task']['name']]
         elif idx < len(toggl_tasks):    # add toggl detail only to table
             line = [toggl_tasks[idx]['id'],
-                    toggl.getProject(toggl_tasks[idx]['pid'])['data']['name'] if toggl_tasks[idx]['pid'] else 'None',
+                    textwrap.shorten(toggl_tasks[idx]['project'], width=20),
                     toggl_tasks[idx]['description'],
                     None,
                     None,
@@ -210,21 +281,21 @@ def presentation_table(toggl, toggl_tasks, harvest, harvest_tasks):
             line = [None,
                     None,
                     None,
-                    harvest_tasks[idx]['id'],
-                    harvest.get_client(harvest_tasks[idx]['client_id'])['client']['name'],
-                    harvest.get_project(harvest_tasks[idx]['project_id'])['project']['name'],
-                    harvest.get_task(harvest_tasks[idx]['task_id'])['task']['name']]
+                    idx,
+                    textwrap.shorten(harvest_tasks[idx]['client']['name'], width=20),
+                    harvest_tasks[idx]['project']['name'],
+                    harvest_tasks[idx]['task']['name']]
         else:
             break
         presentation_table.append(line)
     
     return presentation_table, presentation_header
     
-def task_association_config(toggl, toggl_tasks, harvest, harvest_tasks):
+def task_association_config(toggl_tasks, harvest_tasks):
     
     print("""The following are two tables, one showing the tasks across your Toggl account, and the other showing
 tasks across your Harvest account.""")
-    print(tabulate(*presentation_table(toggl, toggl_tasks, harvest, harvest_tasks), tablefmt="grid"))
+    print(tabulate(*presentation_table(toggl_tasks, harvest_tasks), tablefmt="grid"))
     
     # task_names = [{'id': index, 'pid': x['pid'], 'description': x['description']}
     #               for x in toggl_entries]
@@ -303,16 +374,16 @@ NOTE: Any task #s not appearing in a task config will be ignored."""
         htasks_ignored = [t for t in harvest_tasks if t not in [x for grp in config_groups for x in grp['htasks']]]
 
         print("""The following are the tasks that will be ignored - """)
-        print(tabulate(*presentation_table(toggl, ttasks_ignored, harvest, htasks_ignored), tablefmt="grid"))
+        print(tabulate(*presentation_table(ttasks_ignored, htasks_ignored), tablefmt="grid"))
         cont = input("""add another task config? (y/n)""")
         if cont.lower() not in ('y', 'yes'):
             break
     
     for config_group in config_groups:
         for task in config_group['ttasks']:
-            task_association[task['pid']][task['description']]['harvest_project_id'].append(*[h['project_id'] for h in
+            task_association[task['pid']][task['description']]['harvest_project_id'].append(*[h['project']['id'] for h in
                                                                                             config_group['htasks']])
-            task_association[task['pid']][task['description']]['harvest_task_id'].append(*[h['task_id'] for h in
+            task_association[task['pid']][task['description']]['harvest_task_id'].append(*[h['task']['id'] for h in
                                                                                           config_group['htasks']])
 
     return task_association
