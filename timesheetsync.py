@@ -263,15 +263,15 @@ def presentation_table(toggl_tasks, harvest_tasks):
         idx = len(presentation_table)
         if (idx < len(toggl_tasks)) and (idx < len(harvest_tasks)): # add both details to table
             line = [toggl_tasks[idx]['id'],
-                    textwrap.shorten(toggl_tasks[idx]['project'], width=20),
+                    textwrap.shorten(toggl_tasks[idx]['project'] or '', width=20),
                     toggl_tasks[idx]['description'],
                     idx,
-                    textwrap.shorten(harvest_tasks[idx]['client']['name'], width=20),
+                    textwrap.shorten(harvest_tasks[idx]['client']['name'] or '', width=20),
                     harvest_tasks[idx]['project']['name'],
                     harvest_tasks[idx]['task']['name']]
         elif idx < len(toggl_tasks):    # add toggl detail only to table
             line = [toggl_tasks[idx]['id'],
-                    textwrap.shorten(toggl_tasks[idx]['project'], width=20),
+                    textwrap.shorten(toggl_tasks[idx]['project'] or '', width=20),
                     toggl_tasks[idx]['description'],
                     None,
                     None,
@@ -282,7 +282,7 @@ def presentation_table(toggl_tasks, harvest_tasks):
                     None,
                     None,
                     idx,
-                    textwrap.shorten(harvest_tasks[idx]['client']['name'], width=20),
+                    textwrap.shorten(harvest_tasks[idx]['client']['name'] or '', width=20),
                     harvest_tasks[idx]['project']['name'],
                     harvest_tasks[idx]['task']['name']]
         else:
