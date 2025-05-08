@@ -3,8 +3,8 @@ from dataclasses import asdict, dataclass
 import json
 import pathlib
 from typing import Annotated, Any, Literal
-from toggl.TogglPy import Toggl, Endpoints
 from datetime import datetime, timedelta
+import click
 import pytz
 import dateutil.parser
 import pprint
@@ -13,10 +13,12 @@ import dateparser
 import re
 import requests
 import textwrap
+from toggl_python import ReportTimeEntry, Workspace
 import typer
 from toggl_python import BasicAuth, TokenAuth, auth as toggl_auth_
 from toggl_python.entities import user as toggl_user
 import typer.main
+
 
 TOGGL_API_BASE_URL = "https://api.track.toggl.com/api/v9"
 TOGGL_WORKSPACES_URL = TOGGL_API_BASE_URL + "/workspaces"
@@ -36,7 +38,7 @@ class Harvest:
         self.account_id = hai
         self.auth_key = hk
 
-    def post_all(self, url: str, data: dict):
+    def post_all(self, url: str, data: dict[str, Any]):
         url_address = url
         headers = {
             "Authorization": "Bearer " + self.auth_key,
@@ -316,9 +318,6 @@ def main(
             do_sync(
                 toggl_auth,
                 harvest_auth,
-                creds.toggl_key,
-                creds.harvest_account_id,
-                creds.harvest_key,
                 "",
                 days,
                 daterange,
@@ -391,13 +390,13 @@ def sync(
         str, typer.Option("--harvest-key", "-hk", help="harvest api key")
     ],
     harvest_email: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--harvest-email",
             "-hem",
             help="the email address associated with your harvest user to create new time entries under",
         ),
-    ],
+    ] = None,
     days: Annotated[
         int,
         typer.Option(
@@ -405,7 +404,7 @@ def sync(
             "-d",
             help="integer # of days in the past, from today, to sync for",
         ),
-    ],
+    ] = 0,
     daterange: Annotated[
         str,
         typer.Option(
@@ -414,7 +413,7 @@ def sync(
             help="""Two dates bounding inclusively the dates to sync for, separated by a space.
             No required order. If only one date is given, assumes bounds are from that date to today.""",
         ),
-    ],
+    ] = "",
 ):
     toggl = toggl_auth_.TokenAuth(toggl_key)
     harvest = harvest_login(harvest_account_id, harvest_key)
@@ -422,9 +421,6 @@ def sync(
     do_sync(
         toggl,
         harvest,
-        toggl_key,
-        harvest_account_id,
-        harvest_key,
         harvest_email,
         days,
         daterange,
@@ -434,49 +430,15 @@ def sync(
 def do_sync(
     toggl: BasicAuth | TokenAuth,
     harvest: Harvest,
-    toggl_key: Annotated[str, typer.Option("--toggl-key", "-tk", help="toggl api key")],
-    harvest_account_id: Annotated[
-        str, typer.Option("--harvest-account-id", "-hai", help="harvest account id")
-    ],
-    harvest_key: Annotated[
-        str, typer.Option("--harvest-key", "-hk", help="harvest api key")
-    ],
-    harvest_email: Annotated[
-        str,
-        typer.Option(
-            "--harvest-email",
-            "-hem",
-            help="the email address associated with your harvest user to create new time entries under",
-        ),
-    ],
-    days: Annotated[
-        int,
-        typer.Option(
-            "--days",
-            "-d",
-            help="integer # of days in the past, from today, to sync for",
-        ),
-    ],
-    daterange: Annotated[
-        str,
-        typer.Option(
-            "--daterange",
-            "-dr",
-            help="""Two dates bounding inclusively the dates to sync for, separated by a space.
-            No required order. If only one date is given, assumes bounds are from that date to today.""",
-        ),
-    ],
+    harvest_email: str | None = None,
+    days: int = 0,
+    daterange: str = "",
 ):
     """Convert Toggl time entries into Harvest timesheet entries."""
     pp = pprint.PrettyPrinter(indent=4)
 
-    # create a Toggl object and set our API key
-    toggl_account = Toggl()
-    toggl_account.setAPIKey(toggl_key)
-
-    toggl_me = toggl_account.request(TOGGL_ME_URL)
-    toggl_tz_str = toggl_me["timezone"]
-
+    toggl_me = toggl_user.CurrentUser(toggl).me()
+    toggl_tz_str = toggl_me.timezone
     toggl_tz = pytz.timezone(toggl_tz_str)
 
     # figure out what ranges to sync for
@@ -524,39 +486,31 @@ def do_sync(
 
     # collect toggl entries
     toggl_entries = []
-    toggl_workspaces = toggl_account.request(TOGGL_WORKSPACES_URL)
+    time_reports = []
 
-    for wid in [w["id"] for w in toggl_workspaces]:
+    toggl_workspaces = Workspace(toggl).list()
+    for wid in [w.id for w in toggl_workspaces]:
         for dr in toggl_dateranges:
-            entries_left = 1
-            page = 1
-            while entries_left > 0:
-                entries = toggl_account.request(
-                    Endpoints.REPORT_DETAILED,
-                    {
-                        "workspace_id": wid,
-                        "user_agent": "https://github.com/a3ng7n/timesheet-sync",
-                        "page": page,
-                        "since": dr[0],
-                        "until": dr[1],
-                    },
+            more_reports = True
+            page = 0
+            while more_reports:
+                reports = ReportTimeEntry(toggl).search(
+                    wid, dr[0], dr[1], page_number=page
                 )
-                toggl_entries = entries["data"] + toggl_entries
-                entries_left = (
-                    entries["total_count"] - entries["per_page"]
-                    if page == 1
-                    else entries_left - entries["per_page"]
-                )
+                time_reports = reports + time_reports
+                more_reports = len(reports) > 0
                 page += 1
+
+    toggl_entries = [te for report in time_reports for te in report.time_entries]
 
     task_names = [
         {
-            "id": str(x["pid"]) + x["description"],
-            "pid": x["pid"],
-            "description": x["description"],
-            "project": x["project"],
+            "id": str(x.project_id or -1) + (x.description or ""),
+            "pid": x.project_id,
+            "description": x.description,
+            "project": str(x.project_id or -1),
         }
-        for x in toggl_entries
+        for x in time_reports
     ]
     toggl_task_names = list({x["id"]: x for x in task_names}.values())
     toggl_task_names = sorted(
@@ -566,8 +520,15 @@ def do_sync(
         t["id"] = i
 
     # collect harvest entries
-    harvester = Harvest(harvest_account_id, harvest_key)
-    harvest_users = harvester.get_users()
+    harvest_users = harvest.get_users()
+
+    if not harvest_email:
+        email_choices = click.Choice([x["email"] for x in harvest_users])
+        harvest_email = typer.prompt(
+            "Type the email address associated with the harvest account you'd like to sync to",
+            show_choices=True,
+            type=email_choices,
+        )
 
     try:
         harvest_user_id = [
@@ -577,9 +538,9 @@ def do_sync(
         print("Could not find user with email address: {0}".format(harvest_email))
         raise
 
-    harvest_entries = harvester.get_time_entries()
-    harvest_projects = harvester.get_projects()
-    harvest_task_assignments = harvester.get_task_assignments()
+    harvest_entries = harvest.get_time_entries()
+    harvest_projects = harvest.get_projects()
+    harvest_task_assignments = harvest.get_task_assignments()
 
     # organize the list of task assignments to be used for listing later
     for task_assignment in harvest_task_assignments:
@@ -608,18 +569,16 @@ def do_sync(
     delta = edate - sdate
     dates = [sdate + timedelta(days=i) for i in range(delta.days + 1)]
     combined_entries_dict = {}
+
     for date in dates:
         # collect entries from either platform on the given date
         from_toggl = [
             x
             for x in toggl_entries
             if (
-                (
-                    dateutil.parser.parse(x["start"]).astimezone(toggl_tz)
-                    > toggl_tz.localize(date)
-                )
+                (x.start.astimezone(toggl_tz) > toggl_tz.localize(date))
                 and (
-                    dateutil.parser.parse(x["start"]).astimezone(toggl_tz)
+                    x.start.astimezone(toggl_tz)
                     <= toggl_tz.localize(date) + timedelta(days=1)
                 )
             )
@@ -704,7 +663,7 @@ def do_sync(
             #'{"user_id":1782959,"project_id":14307913,"task_id":8083365,"spent_date":"2017-03-21","hours":1.0}'
             print("About to post: ")
             pp.pprint(entry)
-            pp.pprint(harvester.post_all(url=HARVEST_TIME_ENTRIES_URL, data=entry))
+            pp.pprint(harvest.post_all(url=HARVEST_TIME_ENTRIES_URL, data=entry))
     else:
         print("aborted")
         exit(1)
@@ -893,48 +852,3 @@ NOTE: Any task #s not appearing in a task config will be ignored."""
 
 if __name__ == "__main__":
     app()
-
-    # parser = argparse.ArgumentParser(
-    #     description="A tool to convert Toggl time entries into Harvest timesheet entries."
-    # )
-    # parser.add_argument("-tk", "--toggl-key", dest="toggl_key", help="toggl api key")
-    # parser.add_argument("-url", "--harvest-url", dest="harvest_url", help="harvest url")
-    # parser.add_argument(
-    #     "-hai",
-    #     "--harvest-account-id",
-    #     dest="harvest_account_id",
-    #     help="harvest account id",
-    # )
-    # parser.add_argument(
-    #     "-hk", "--harvest-key", dest="harvest_key", help="harvest api key"
-    # )
-    # parser.add_argument(
-    #     "-hem",
-    #     "--harvest-email",
-    #     dest="harvest_email",
-    #     help="the email address associated with your harvest user to create new time entries under",
-    # )
-    # timeparse = parser.add_argument_group(
-    #     description="""Time bounds of syncronization. If neither are given, """
-    #     """assumes 365 days in the past to today."""
-    # )
-    # mxg = timeparse.add_mutually_exclusive_group()
-    # mxg.add_argument(
-    #     "-d",
-    #     "--days",
-    #     dest="days",
-    #     type=int,
-    #     help="integer # of days in the past, from today, to sync for",
-    # )
-    # mxg.add_argument(
-    #     "-dr",
-    #     "--daterange",
-    #     dest="daterange",
-    #     nargs="+",
-    #     help="""Two dates bounding inclusively the dates to sync for, separated by a space. """
-    #     """No required order. If only one date is given, assumes bounds are from that date to today.""",
-    # )
-
-    # args = parser.parse_args()
-    #
-    # main(args)

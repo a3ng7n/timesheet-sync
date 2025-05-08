@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "dateparser==1.2.0",
+  "debugpy>=1.8.14",
   "python-dateutil==2.8.1",
   "python-toggl>=1.1.0",
   "pytz==2019.3",
