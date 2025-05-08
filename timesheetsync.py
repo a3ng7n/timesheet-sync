@@ -2,9 +2,10 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import json
 import pathlib
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, override
 from datetime import datetime, timedelta
 import click
+from click.core import ParameterSource
 import pytz
 import dateutil.parser
 import pprint
@@ -17,7 +18,6 @@ from toggl_python import ReportTimeEntry, Workspace
 import typer
 from toggl_python import BasicAuth, TokenAuth, auth as toggl_auth_
 from toggl_python.entities import user as toggl_user
-import typer.main
 
 
 TOGGL_API_BASE_URL = "https://api.track.toggl.com/api/v9"
@@ -31,6 +31,74 @@ HARVEST_CLIENTS_URL = HARVEST_API_BASE_URL + "/clients"
 HARVEST_TASKS_URL = HARVEST_API_BASE_URL + "/tasks"
 HARVEST_TASK_ASSIGNMENTS_URL = HARVEST_API_BASE_URL + "/task_assignments"
 HARVEST_PROJECTS_URL = HARVEST_API_BASE_URL + "/projects"
+
+
+class MutuallyExclusiveOption(click.ParamType):
+    mutually_exclusive: set[tuple[str, type]]
+    exclusive_types: dict[str, type]
+    exclusive_names: set[str]
+
+    def __init__(
+        self, *args, mutually_exclusive: list[tuple[str, type]] | None = None, **kwargs
+    ):
+        self.mutually_exclusive = set(mutually_exclusive or [])
+        self.exclusive_types = {k: v for k, v in self.mutually_exclusive}
+        self.exclusive_names = set(self.exclusive_types)
+        super(MutuallyExclusiveOption, self).__init__()
+
+    @override
+    def get_metavar(self, param: click.Parameter) -> str | None:
+        return ((name := param.name) is not None and name.upper()) or None
+
+    @property
+    @override
+    def name(self) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
+        return ""
+
+    @property
+    def mutual_str(self) -> str:
+        return ", ".join(self.exclusive_types)
+
+    @override
+    def convert(self, value, param, ctx):
+        param_source = (
+            ctx is not None
+            and param is not None
+            and param.name is not None
+            and ctx.get_parameter_source(param.name)
+        ) or None
+
+        if (
+            ctx is not None
+            and self.exclusive_names.intersection(ctx.params)
+            and param_source != ParameterSource.DEFAULT
+        ):
+            # if a value has affirmatively been provided to this option
+            # and it's mutually exclusive with another provided option
+            # fail out
+            raise click.UsageError(
+                "Illegal usage: `{}` is mutually exclusive with arguments `{}`.".format(
+                    (param is not None and param.name) or "", self.mutual_str
+                )
+            )
+        elif (
+            ctx is not None
+            and self.exclusive_names.intersection(ctx.params)
+            and param_source == ParameterSource.DEFAULT
+        ):
+            # if this option has been defaulted and it's mutually exclusive
+            # then null out its value
+            value = None
+
+        my_type = (
+            param is not None
+            and param.name is not None
+            and self.exclusive_types.get(param.name, None)
+        ) or None
+        if my_type is not None:
+            value = my_type(value)
+
+        return super(MutuallyExclusiveOption, self).convert(value, param, ctx)
 
 
 class Harvest:
@@ -174,55 +242,80 @@ app = typer.Typer()
 login_app = typer.Typer()
 
 
-def login_result_callback(*_args, **_kwargs):
-    with update_cache(state.cache, state.store, state.cache_file) as cache_data:
-        updated_credentials = {
-            k: v for k, v in asdict(credentials).items() if v is not None
-        }
-        cache_data.update(updated_credentials)
-
-
-@login_app.callback(result_callback=login_result_callback)
-def login_callback(
-    cache_file: Annotated[
-        pathlib.Path,
-        typer.Option(
-            help="Location to look for toggl and harvest credentials",
-        ),
-    ] = pathlib.Path(".creds"),
-    store: Annotated[
-        bool,
-        typer.Option(" /--no-store", " /-s", help="Store credentials in file"),
-    ] = True,
-):
-    state.cache = True
-    state.cache_file = cache_file
-    state.store = store
-
-
 app.add_typer(login_app, name="login")
+
+mutual_date_option = MutuallyExclusiveOption(
+    mutually_exclusive=[("daterange", str), ("days", int)]
+)
+
+
+def parse_date_range(days: int | None, daterange: list[str] | None):
+    if days is not None:
+        edate = datetime.today().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+        sdate = edate - timedelta(days=abs(days) + 1)
+    elif daterange is not None:
+        dates = [dateparser.parse(x) for x in daterange]
+        dates = [x for x in dates if x is not None]
+
+        if len(dates) < 1:
+            raise ValueError(f"Unable to parse a date within range: {daterange}")
+
+        if len(dates) < 2:
+            dates.append(
+                datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
+            )
+
+        dates = sorted(dates)
+        sdate = dates[0]
+        edate = dates[1] + timedelta(days=1)
+    else:
+        edate = datetime.today().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+        sdate = edate + timedelta(days=-365)
+
+    return sdate, edate
 
 
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
     days: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--days",
             "-d",
-            help="integer # of days in the past, from today, to sync for",
+            click_type=mutual_date_option,
+            help="""integer # of days in the past, from today, to sync for
+            NOTE: This argument is mutually exclusive with arguments: [daterange, datebound].
+            """,
         ),
-    ] = 0,
+    ] = None,
     daterange: Annotated[
-        str,
+        tuple[str, str] | None,
         typer.Option(
             "--daterange",
             "-dr",
+            click_type=mutual_date_option,
             help="""Two dates bounding inclusively the dates to sync for, separated by a space.
-            No required order. If only one date is given, assumes bounds are from that date to today.""",
+            No required order. If only one date is given, assumes bounds are from that date to today.
+            NOTE: This argument is mutually exclusive with arguments: [days, datebound].
+            """,
         ),
-    ] = "",
+    ] = None,
+    datebound: Annotated[
+        str | None,
+        typer.Option(
+            "--datebound",
+            "-db",
+            click_type=mutual_date_option,
+            help="""A date in the past from which to include time entries.
+            NOTE: This argument is mutually exclusive with arguments: [days, daterange].
+            """,
+        ),
+    ] = None,
     cache_file: Annotated[
         pathlib.Path,
         typer.Option(
@@ -249,6 +342,10 @@ def main(
 
         toggl_auth = None
         harvest_auth = None
+
+        start_date, end_date = parse_date_range(
+            days, (daterange and list(daterange)) or (datebound and [datebound]) or None
+        )
 
         with update_cache(cache, store, cache_file) as cache_data:
             credentials.toggl_key = cache_data.get("toggl_key", None)
@@ -305,23 +402,43 @@ def main(
 
             print("harvest login complete")
 
-            cache_data.update(asdict(credentials))
+            creds = ConfirmedCredentials.from_creds(credentials)
+            cache_data.update(asdict(creds))
 
-        creds = ConfirmedCredentials.from_creds(credentials)
-
-        if (
-            toggl_auth is not None
-            and toggl_auth != "test"
-            and harvest_auth is not None
-            and harvest_auth != "test"
-        ):
+        if toggl_auth != "test" and harvest_auth != "test":
             do_sync(
                 toggl_auth,
                 harvest_auth,
+                start_date,
+                end_date,
                 "",
-                days,
-                daterange,
             )
+
+
+def login_result_callback(*_args, **_kwargs):
+    with update_cache(state.cache, state.store, state.cache_file) as cache_data:
+        updated_credentials = {
+            k: v for k, v in asdict(credentials).items() if v is not None
+        }
+        cache_data.update(updated_credentials)
+
+
+@login_app.callback(result_callback=login_result_callback)
+def login_callback(
+    cache_file: Annotated[
+        pathlib.Path,
+        typer.Option(
+            help="Location to look for toggl and harvest credentials",
+        ),
+    ] = pathlib.Path(".creds"),
+    store: Annotated[
+        bool,
+        typer.Option(" /--no-store", " /-s", help="Store credentials in file"),
+    ] = True,
+):
+    state.cache = True
+    state.cache_file = cache_file
+    state.store = store
 
 
 @login_app.command("harvest")
@@ -367,6 +484,19 @@ def toggl_login(
     return auth
 
 
+@login_app.command("toggl-key")
+def toggl_login_key(
+    key: Annotated[str, typer.Option(prompt=True, help="toggl access key")],
+):
+    auth = toggl_auth_.TokenAuth(key)
+    user = toggl_user.CurrentUser(auth=auth).me()
+    print("toggl auth success")
+    credentials.toggl_key = user.api_token
+    state.toggl_auth = auth
+
+    return auth
+
+
 @login_app.command("toggl-test")
 def toggl_login_test(
     email: Annotated[str, typer.Option(prompt=True, help="toggl login email")],
@@ -398,41 +528,62 @@ def sync(
         ),
     ] = None,
     days: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--days",
             "-d",
-            help="integer # of days in the past, from today, to sync for",
+            click_type=mutual_date_option,
+            help="""integer # of days in the past, from today, to sync for
+            NOTE: This argument is mutually exclusive with arguments: [daterange, datebound].
+            """,
         ),
-    ] = 0,
+    ] = None,
     daterange: Annotated[
-        str,
+        tuple[str, str] | None,
         typer.Option(
             "--daterange",
             "-dr",
+            click_type=mutual_date_option,
             help="""Two dates bounding inclusively the dates to sync for, separated by a space.
-            No required order. If only one date is given, assumes bounds are from that date to today.""",
+            No required order. If only one date is given, assumes bounds are from that date to today.
+            NOTE: This argument is mutually exclusive with arguments: [days, datebound].
+            """,
         ),
-    ] = "",
+    ] = None,
+    datebound: Annotated[
+        str | None,
+        typer.Option(
+            "--datebound",
+            "-db",
+            click_type=mutual_date_option,
+            help="""A date in the past from which to include time entries.
+            NOTE: This argument is mutually exclusive with arguments: [days, daterange].
+            """,
+        ),
+    ] = None,
 ):
+    start_date, end_date = parse_date_range(
+        days, (daterange and list(daterange)) or (datebound and [datebound]) or None
+    )
+
     toggl = toggl_auth_.TokenAuth(toggl_key)
     harvest = harvest_login(harvest_account_id, harvest_key)
 
     do_sync(
         toggl,
         harvest,
+        start_date,
+        end_date,
         harvest_email,
-        days,
-        daterange,
     )
 
 
 def do_sync(
     toggl: BasicAuth | TokenAuth,
     harvest: Harvest,
+    start_date: datetime,
+    end_date: datetime,
     harvest_email: str | None = None,
-    days: int = 0,
-    daterange: str = "",
 ):
     """Convert Toggl time entries into Harvest timesheet entries."""
     pp = pprint.PrettyPrinter(indent=4)
@@ -441,42 +592,24 @@ def do_sync(
     toggl_tz_str = toggl_me.timezone
     toggl_tz = pytz.timezone(toggl_tz_str)
 
-    # figure out what ranges to sync for
-    if days:
-        edate = datetime.today().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ) + timedelta(days=1)
-        sdate = edate - timedelta(days=abs(days) + 1)
-    elif daterange:
-        dates = [dateparser.parse(x) for x in daterange]
-        if len(dates) < 2:
-            dates.append(
-                datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
-            )
-        dates = sorted(dates)
-        sdate = dates[0]
-        edate = dates[1] + timedelta(days=1)
-    else:
-        edate = datetime.today().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ) + timedelta(days=1)
-        sdate = edate + timedelta(days=-365)
-
     # do some fancy date windowing required for retrieving tasks from toggl
     toggl_dateranges = []
-    chunks = (edate - sdate).days // 180
-    partials = (edate - sdate).days % 180
+    chunks = (end_date - start_date).days // 180
+    partials = (end_date - start_date).days % 180
 
-    for i in range((edate - sdate).days // 180):
+    for i in range((end_date - start_date).days // 180):
         toggl_dateranges.append(
-            [sdate + timedelta(days=i * 180), sdate + timedelta(days=(i + 1) * 180 - 1)]
+            [
+                start_date + timedelta(days=i * 180),
+                start_date + timedelta(days=(i + 1) * 180 - 1),
+            ]
         )
 
     if partials:
         toggl_dateranges.append(
             [
-                sdate + timedelta(days=chunks * 180),
-                sdate + timedelta(days=chunks * 180 + partials),
+                start_date + timedelta(days=chunks * 180),
+                start_date + timedelta(days=chunks * 180 + partials),
             ]
         )
 
@@ -566,8 +699,8 @@ def do_sync(
     task_association = task_association_config(toggl_task_names, harvest_task_names)
 
     # organize toggl entries by dates worked
-    delta = edate - sdate
-    dates = [sdate + timedelta(days=i) for i in range(delta.days + 1)]
+    delta = end_date - start_date
+    dates = [start_date + timedelta(days=i) for i in range(delta.days + 1)]
     combined_entries_dict = {}
 
     for date in dates:

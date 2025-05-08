@@ -28,7 +28,7 @@ You'll also need to obtain api keys for either account:
 
 There are unfortunately quite a few args, but hey, what can you do:
 
-    python timesheetsync.py [-h] [-tk TOGGL_KEY] [-url HARVEST_URL]
+    uv run timesheetsync.py [-h] [-tk TOGGL_KEY] [-url HARVEST_URL]
                         [-hai HARVEST_ACCOUNT_ID] [-hk HARVEST_KEY]
                         [-hem HARVEST_EMAIL]
                         [-d DAYS | -dr DATERANGE [DATERANGE ...]]
@@ -59,7 +59,11 @@ There are unfortunately quite a few args, but hey, what can you do:
 
 For help, do the usual:
 
-    python timesheetsync.py --help
+    uv run timesheetsync.py --help
+
+## Testing
+
+    uv run pytest
 
 ## License
 
