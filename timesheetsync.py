@@ -2,10 +2,11 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import json
 import pathlib
-from typing import Annotated, Any, Literal, override
+from typing import Annotated, Any, Literal, TypedDict, override
 from datetime import datetime, timedelta
 import click
 from click.core import ParameterSource
+from pydantic import AwareDatetime, BaseModel, BeforeValidator
 import pytz
 import dateutil.parser
 import pprint
@@ -14,7 +15,7 @@ import dateparser
 import re
 import requests
 import textwrap
-from toggl_python import ReportTimeEntry, Workspace
+from toggl_python import ReportTimeEntry, SearchReportTimeEntriesResponse, Workspace
 import typer
 from toggl_python import BasicAuth, TokenAuth, auth as toggl_auth_
 from toggl_python.entities import user as toggl_user
@@ -622,6 +623,35 @@ def do_sync(
     time_reports = []
 
     toggl_workspaces = Workspace(toggl).list()
+
+    class TogglTimeEntry(BaseModel):
+        project_id: Annotated[str, BeforeValidator(lambda v: str(v or -1))]
+        description: Annotated[str, BeforeValidator(lambda v: v or "")]
+        billable: bool
+        billable_amount_in_cents: int | None
+        currency: str
+        hourly_rate_in_cents: int | None
+        row_number: int
+        tag_ids: list[int]
+        task_id: int | None
+        user_id: int
+        username: str
+        at: AwareDatetime
+        at_tz: AwareDatetime
+        id: int
+        seconds: int
+        start: AwareDatetime
+        stop: AwareDatetime
+
+        @classmethod
+        def from_resp(cls, resp: SearchReportTimeEntriesResponse):
+            assert len(resp.time_entries) == 1
+            time_entry = resp.time_entries[0]
+            combined = time_entry.model_dump()
+            combined.update(resp.model_dump())
+            new_model = cls.model_validate(combined)
+            return new_model
+
     for wid in [w.id for w in toggl_workspaces]:
         for dr in toggl_dateranges:
             more_reports = True
@@ -634,16 +664,16 @@ def do_sync(
                 more_reports = len(reports) > 0
                 page += 1
 
-    toggl_entries = [te for report in time_reports for te in report.time_entries]
+    toggl_entries = [TogglTimeEntry.from_resp(report) for report in time_reports]
 
-    task_names = [
+    task_names: list[dict[str, str | int]] = [
         {
-            "id": str(x.project_id or -1) + (x.description or ""),
+            "id": x.project_id + x.description,
             "pid": x.project_id,
             "description": x.description,
-            "project": str(x.project_id or -1),
+            "project": x.project_id,
         }
-        for x in time_reports
+        for x in toggl_entries
     ]
     toggl_task_names = list({x["id"]: x for x in task_names}.values())
     toggl_task_names = sorted(
@@ -671,7 +701,25 @@ def do_sync(
         print("Could not find user with email address: {0}".format(harvest_email))
         raise
 
+    class HarvestEntry(TypedDict):
+        id: int
+        spent_date: str
+        hours: float
+        hours_without_timer: float
+        rounded_hours: float
+        notes: str
+        is_locked: bool
+        locked_reason: str
+        is_closed: bool
+        is_billed: bool
+
     harvest_entries = harvest.get_time_entries()
+    if not isinstance(harvest_entries, list):
+        raise RuntimeError(
+            "Unexpected object type received when querying for harvest time entries"
+        )
+    harvest_entries: list[HarvestEntry] = harvest_entries
+
     harvest_projects = harvest.get_projects()
     harvest_task_assignments = harvest.get_task_assignments()
 
@@ -695,13 +743,19 @@ def do_sync(
         harvest_task_assignments, key=lambda k: k["client"]["id"]
     )
 
-    # prompt the user for a task association config
-    task_association = task_association_config(toggl_task_names, harvest_task_names)
-
     # organize toggl entries by dates worked
     delta = end_date - start_date
     dates = [start_date + timedelta(days=i) for i in range(delta.days + 1)]
-    combined_entries_dict = {}
+
+    class Idkmybffjill[T](TypedDict):
+        raw: T
+        tasks: dict[str, Any]
+
+    class CombinedEntries(TypedDict):
+        toggl: Idkmybffjill[list[TogglTimeEntry]]
+        harvest: Idkmybffjill[list[HarvestEntry]]
+
+    combined_entries_dict: dict[datetime, CombinedEntries] = {}
 
     for date in dates:
         # collect entries from either platform on the given date
@@ -731,34 +785,34 @@ def do_sync(
             }
 
             # organize raw entries into unique tasks, and total time for that day
-            for platform in combined_entries_dict[date].keys():
-                for entry in combined_entries_dict[date][platform]["raw"]:
-                    if platform == "toggl":
-                        if (
-                            entry["pid"]
-                            not in combined_entries_dict[date][platform]["tasks"].keys()
-                        ):
-                            combined_entries_dict[date][platform]["tasks"][
-                                entry["pid"]
-                            ] = {}
+            for entry in combined_entries_dict[date]["toggl"]["raw"]:
+                if (
+                    entry.project_id
+                    not in combined_entries_dict[date]["toggl"]["tasks"].keys()
+                ):
+                    combined_entries_dict[date]["toggl"]["tasks"][entry.project_id] = {}
 
-                        try:
-                            combined_entries_dict[date][platform]["tasks"][
-                                entry["pid"]
-                            ][entry["description"]] += entry["dur"] / 3600000
-                        except KeyError:
-                            combined_entries_dict[date][platform]["tasks"][
-                                entry["pid"]
-                            ][entry["description"]] = entry["dur"] / 3600000
-                    else:
-                        try:
-                            combined_entries_dict[date][platform]["tasks"][
-                                entry["notes"]
-                            ] += entry["hours"]
-                        except KeyError:
-                            combined_entries_dict[date][platform]["tasks"][
-                                entry["notes"]
-                            ] = entry["hours"]
+                try:
+                    combined_entries_dict[date]["toggl"]["tasks"][entry.project_id][
+                        entry.description
+                    ] += entry.seconds / 3600
+                except KeyError:
+                    combined_entries_dict[date]["toggl"]["tasks"][entry.project_id][
+                        entry.description
+                    ] = entry.seconds / 3600
+
+            for entry in combined_entries_dict[date]["harvest"]["raw"]:
+                try:
+                    combined_entries_dict[date]["harvest"]["tasks"][entry["notes"]] += (
+                        entry["hours"]
+                    )
+                except KeyError:
+                    combined_entries_dict[date]["harvest"]["tasks"][entry["notes"]] = (
+                        entry["hours"]
+                    )
+
+    # prompt the user for a task association config
+    task_association = task_association_config(toggl_task_names, harvest_task_names)
 
     # add data to harvest
     add_to_harvest = []
@@ -861,20 +915,6 @@ def task_association_config(toggl_tasks, harvest_tasks):
     print("""The following are two tables, one showing the tasks across your Toggl account, and the other showing
 tasks across your Harvest account.""")
     print(tabulate(*presentation_table(toggl_tasks, harvest_tasks), tablefmt="grid"))
-
-    # task_names = [{'id': index, 'pid': x['pid'], 'description': x['description']}
-    #               for x in toggl_entries]
-    #
-    # task_names = [{'id': index,
-    #                'client_id': x['day_entry']['client_id'],
-    #                'project_id': x['day_entry']['project_id'],
-    #                'task_id': x['day_entry']['task_id']}
-    #               for x in harvest_entries]
-    # task_association = {
-    #     toggl_pid: { toggl_description: {
-    #                   harvest_project_id: 1234,
-    #                   harvest_task_id: 1234 }
-    # }
 
     help_msg = """You'll need to enter which Toggl tasks you'd like to associate with which Harvest tasks.
 You'll be asked to enter an association formula - the formula should take the following form:
