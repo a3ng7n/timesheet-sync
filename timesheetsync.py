@@ -16,9 +16,9 @@ import re
 import requests
 import textwrap
 from toggl_python import ReportTimeEntry, SearchReportTimeEntriesResponse, Workspace
-import typer
 from toggl_python import BasicAuth, TokenAuth, auth as toggl_auth_
 from toggl_python.entities import user as toggl_user
+import typer
 
 
 TOGGL_API_BASE_URL = "https://api.track.toggl.com/api/v9"
@@ -579,6 +579,58 @@ def sync(
     )
 
 
+class TogglTimeEntry(BaseModel):
+    project_id: Annotated[str, BeforeValidator(lambda v: str(v or -1))]
+    description: Annotated[str, BeforeValidator(lambda v: v or "")]
+    billable: bool
+    billable_amount_in_cents: int | None
+    currency: str
+    hourly_rate_in_cents: int | None
+    row_number: int
+    tag_ids: list[int]
+    task_id: int | None
+    user_id: int
+    username: str
+    at: AwareDatetime
+    at_tz: AwareDatetime
+    id: int
+    seconds: int
+    start: AwareDatetime
+    stop: AwareDatetime
+
+    @classmethod
+    def from_resp(cls, resp: SearchReportTimeEntriesResponse):
+        assert len(resp.time_entries) == 1
+        time_entry = resp.time_entries[0]
+        combined = time_entry.model_dump()
+        combined.update(resp.model_dump())
+        new_model = cls.model_validate(combined)
+        return new_model
+
+
+class HarvestEntry(TypedDict):
+    id: int
+    spent_date: str
+    hours: float
+    hours_without_timer: float
+    rounded_hours: float
+    notes: str
+    is_locked: bool
+    locked_reason: str
+    is_closed: bool
+    is_billed: bool
+
+
+class RawTaskContext[T, U](TypedDict):
+    raw: T
+    tasks: dict[str, U]
+
+
+class CombinedEntries(TypedDict):
+    toggl: RawTaskContext[list[TogglTimeEntry], dict[str, float]]
+    harvest: RawTaskContext[list[HarvestEntry], float]
+
+
 def do_sync(
     toggl: BasicAuth | TokenAuth,
     harvest: Harvest,
@@ -623,34 +675,6 @@ def do_sync(
     time_reports = []
 
     toggl_workspaces = Workspace(toggl).list()
-
-    class TogglTimeEntry(BaseModel):
-        project_id: Annotated[str, BeforeValidator(lambda v: str(v or -1))]
-        description: Annotated[str, BeforeValidator(lambda v: v or "")]
-        billable: bool
-        billable_amount_in_cents: int | None
-        currency: str
-        hourly_rate_in_cents: int | None
-        row_number: int
-        tag_ids: list[int]
-        task_id: int | None
-        user_id: int
-        username: str
-        at: AwareDatetime
-        at_tz: AwareDatetime
-        id: int
-        seconds: int
-        start: AwareDatetime
-        stop: AwareDatetime
-
-        @classmethod
-        def from_resp(cls, resp: SearchReportTimeEntriesResponse):
-            assert len(resp.time_entries) == 1
-            time_entry = resp.time_entries[0]
-            combined = time_entry.model_dump()
-            combined.update(resp.model_dump())
-            new_model = cls.model_validate(combined)
-            return new_model
 
     for wid in [w.id for w in toggl_workspaces]:
         for dr in toggl_dateranges:
@@ -701,18 +725,6 @@ def do_sync(
         print("Could not find user with email address: {0}".format(harvest_email))
         raise
 
-    class HarvestEntry(TypedDict):
-        id: int
-        spent_date: str
-        hours: float
-        hours_without_timer: float
-        rounded_hours: float
-        notes: str
-        is_locked: bool
-        locked_reason: str
-        is_closed: bool
-        is_billed: bool
-
     harvest_entries = harvest.get_time_entries()
     if not isinstance(harvest_entries, list):
         raise RuntimeError(
@@ -746,14 +758,6 @@ def do_sync(
     # organize toggl entries by dates worked
     delta = end_date - start_date
     dates = [start_date + timedelta(days=i) for i in range(delta.days + 1)]
-
-    class Idkmybffjill[T](TypedDict):
-        raw: T
-        tasks: dict[str, Any]
-
-    class CombinedEntries(TypedDict):
-        toggl: Idkmybffjill[list[TogglTimeEntry]]
-        harvest: Idkmybffjill[list[HarvestEntry]]
 
     combined_entries_dict: dict[datetime, CombinedEntries] = {}
 
