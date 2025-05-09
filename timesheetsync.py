@@ -20,11 +20,6 @@ from toggl_python import BasicAuth, TokenAuth, auth as toggl_auth_
 from toggl_python.entities import user as toggl_user
 import typer
 
-
-TOGGL_API_BASE_URL = "https://api.track.toggl.com/api/v9"
-TOGGL_WORKSPACES_URL = TOGGL_API_BASE_URL + "/workspaces"
-TOGGL_ME_URL = TOGGL_API_BASE_URL + "/me"
-
 HARVEST_API_BASE_URL = "https://api.harvestapp.com/v2"
 HARVEST_TIME_ENTRIES_URL = HARVEST_API_BASE_URL + "/time_entries"
 HARVEST_USERS_URL = HARVEST_API_BASE_URL + "/users"
@@ -608,7 +603,7 @@ class TogglTimeEntry(BaseModel):
         return new_model
 
 
-class HarvestEntry(TypedDict):
+class HarvestTimeEntry(TypedDict):
     id: int
     spent_date: str
     hours: float
@@ -628,7 +623,7 @@ class RawTaskContext[T, U](TypedDict):
 
 class CombinedEntries(TypedDict):
     toggl: RawTaskContext[list[TogglTimeEntry], dict[str, float]]
-    harvest: RawTaskContext[list[HarvestEntry], float]
+    harvest: RawTaskContext[list[HarvestTimeEntry], float]
 
 
 def do_sync(
@@ -730,7 +725,7 @@ def do_sync(
         raise RuntimeError(
             "Unexpected object type received when querying for harvest time entries"
         )
-    harvest_entries: list[HarvestEntry] = harvest_entries
+    harvest_entries: list[HarvestTimeEntry] = harvest_entries
 
     harvest_projects = harvest.get_projects()
     harvest_task_assignments = harvest.get_task_assignments()
