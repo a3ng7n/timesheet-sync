@@ -725,6 +725,7 @@ def do_sync(
         raise RuntimeError(
             "Unexpected object type received when querying for harvest time entries"
         )
+    harvest_entries = [e for e in harvest_entries if e.get("user_id") == harvest_user_id]
     harvest_entries: list[HarvestTimeEntry] = harvest_entries
 
     harvest_projects = harvest.get_projects()
